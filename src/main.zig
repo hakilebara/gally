@@ -30,30 +30,20 @@ const SectionId = enum(u8) {
     tag = 0x0D,
 };
 
-pub fn parsePreamble(reader: *Io.Reader) !void {
-    const magic = try reader.take(4);
-    if (!mem.eql(u8, magic, "\x00asm")) {
-        return error.InvalidMagic;
-    }
+const Opcode = enum(u8) {
+    @"local.get" = 0x20,
+    @"local.set" = 0x21,
+};
 
-    const version = try reader.takeInt(u32, .little);
-    if (version != 1) {
-        return error.UnknownVersion;
-    }
-}
+const Code = struct {
+    locals: ArrayList(Local),
+    expr: []const u8,
+};
 
-pub fn readSection(alloc: mem.Allocator, reader: *Io.Reader, module: *Module) !void {
-    const id: SectionId = try reader.takeEnum(SectionId, .little);
-    const section_size = try reader.takeLeb128(u32);
-    _ = section_size;
-    return switch (id) {
-        .type => parseTypeSection(alloc, reader, module),
-        .function => parseFunctionSection(alloc, reader, module),
-        .@"export" => parseExportSection(alloc, reader, module),
-        .code => parseCodeSection(alloc, reader, module),
-        else => error.UnknownSection,
-    };
-}
+const Local = struct {
+    count: u32,
+    type: ValType,
+};
 
 const Module = struct {
     type_section: ArrayList(FuncType),
@@ -96,6 +86,18 @@ const FuncType = struct {
         };
     }
 };
+
+pub fn parsePreamble(reader: *Io.Reader) !void {
+    const magic = try reader.take(4);
+    if (!mem.eql(u8, magic, "\x00asm")) {
+        return error.InvalidMagic;
+    }
+
+    const version = try reader.takeInt(u32, .little);
+    if (version != 1) {
+        return error.UnknownVersion;
+    }
+}
 
 fn parseTypeSection(alloc: mem.Allocator, reader: *Io.Reader, module: *Module) !void {
     var functype_count = try reader.takeLeb128(u32);
@@ -146,26 +148,11 @@ fn parseExportSection(alloc: mem.Allocator, reader: *Io.Reader, module: *Module)
     }
 }
 
-const Opcode = enum(u8) {
-    @"local.get" = 0x20,
-    @"local.set" = 0x21,
-};
-
-const Code = struct {
-    locals: ArrayList(Local),
-    expr: []const u8,
-};
-
-const Local = struct {
-    count: u32,
-    type: ValType,
-};
-
 fn parseCodeSection(alloc: mem.Allocator, reader: *Io.Reader, module: *Module) !void {
     var code_count = try reader.takeLeb128(u32);
     module.code_section = try ArrayList(Code).initCapacity(alloc, code_count);
     while (code_count > 0) : (code_count -= 1) {
-        var code : Code = .{
+        var code: Code = .{
             .locals = undefined,
             .expr = undefined,
         };
@@ -175,7 +162,7 @@ fn parseCodeSection(alloc: mem.Allocator, reader: *Io.Reader, module: *Module) !
         // TODO: Make it a function
         code.locals = try ArrayList(Local).initCapacity(alloc, locals_count);
         while (locals_count > 0) : (locals_count -= 1) {
-            const local : Local = .{
+            const local: Local = .{
                 .count = try reader.takeLeb128(u32),
                 .type = try reader.takeEnum(ValType, .little),
             };
@@ -185,6 +172,19 @@ fn parseCodeSection(alloc: mem.Allocator, reader: *Io.Reader, module: *Module) !
         code.expr = try reader.takeSentinel(0x0b);
         try module.code_section.append(alloc, code);
     }
+}
+
+pub fn readSection(alloc: mem.Allocator, reader: *Io.Reader, module: *Module) !void {
+    const id: SectionId = try reader.takeEnum(SectionId, .little);
+    const section_size = try reader.takeLeb128(u32);
+    _ = section_size;
+    return switch (id) {
+        .type => parseTypeSection(alloc, reader, module),
+        .function => parseFunctionSection(alloc, reader, module),
+        .@"export" => parseExportSection(alloc, reader, module),
+        .code => parseCodeSection(alloc, reader, module),
+        else => error.UnknownSection,
+    };
 }
 
 const expectEqual = std.testing.expectEqual;
@@ -224,15 +224,15 @@ test parseFunctionSection {
 
     var reader: Io.Reader = .fixed(&.{
         0x01,
-            0x00,
+        0x00,
     });
     var module = Module.init();
     try parseFunctionSection(arena, &reader, &module);
 
     reader = .fixed(&.{
         0x02,
-            0x00,
-            0x01,
+        0x00,
+        0x01,
     });
     try parseFunctionSection(arena, &reader, &module);
     try expectEqualSlices(u32, module.function_section.items, &.{ 0, 1 });
@@ -246,8 +246,8 @@ test parseExportSection {
     var reader: Io.Reader = .fixed(&.{
         0x01,
         0x06,
-            0x61, 0x64, 0x64, 0x49, 0x6E, 0x74, // "addInt"
-        0x00, 0x00
+        0x61, 0x64, 0x64, 0x49, 0x6E, 0x74, // "addInt"
+        0x00, 0x00,
     });
     var module = Module.init();
     try parseExportSection(arena, &reader, &module);
@@ -256,18 +256,19 @@ test parseExportSection {
     try expectEqual(module.export_section.items[0].idx, 0);
 }
 
-
 test parseCodeSection {
     var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer aa.deinit();
     const arena = aa.allocator();
 
-    var reader: Io.Reader = .fixed(&.{ 
+    var reader: Io.Reader = .fixed(&.{
         0x01,
         0x07,
         0x00,
-        0x20, 0x00,
-        0x20, 0x01,
+        0x20,
+        0x00,
+        0x20,
+        0x01,
         0x6A,
         0x0B,
     });
@@ -275,4 +276,23 @@ test parseCodeSection {
     try parseCodeSection(arena, &reader, &module);
     try expectEqualSlices(Local, module.code_section.items[0].locals.items, &.{});
     try expectEqualSlices(u8, module.code_section.items[0].expr, &.{ 0x20, 0x00, 0x20, 0x01, 0x6A });
+}
+
+test invokeFunction {
+    //  check preample of binary file
+    //  create buffer from binary file
+    //  init empty module
+    //  populate module with parsed sections of buffer
+    //  then what? btw what is 'module instantiation' in here?
+    //  the module is now an in-memory representation of a wasm module
+    //  I need to create a stack machine
+    //  in C a stack would be an array and a pointer, what about in zig ?
+    const binary = @embedFile("addint.wasm");
+
+    var aa = std.head.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+
+    var reader: Io.Reader = .fixed(binary);
+    var module = Module.init();
 }
